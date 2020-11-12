@@ -181,30 +181,17 @@ file:///usr/share/doc/HTML/en-US/index.html
 
   /* Compute distances. */
   for (size_t i = 0; i < ln; i++) {
-    //distance[i].viewer_id = i + ln * rank; //+ ln * rank to make adjust?
     for (size_t j = 0; j < m - 1; j++) {
       distance[i] += fabs(urating[j] - rating[i * m + j]);
     }
   }
 
-  // printf("hi this is rank %d and these are my dsistances:\n", rank);
-  // for(int i = 0; i < ln; i++){
-  //   printf("rank %d here: distances[%d] : %lf\n", rank, i + ln * rank, distance[i]);
-  // }
 
   if(0 != rank){
     ret = MPI_Send(distance, ln, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD);
     assert(ret == MPI_SUCCESS);
   }
-
-  // if(1 == rank){
-  //   printf("sent %d in memory to rank 0", ln * sizeof(*distance));
-  //   ret = MPI_Send(distance, ln, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD);
-  //
-  //   assert(ret == MPI_SUCCESS);
-  // }
   else{
-    size_t test = base;
     struct distance_metric * const finalDistances = calloc(n, sizeof(*finalDistances));
     for(int i; i < ln; i++){
       finalDistances[i].distance = distance[i];
@@ -212,13 +199,10 @@ file:///usr/share/doc/HTML/en-US/index.html
     }
     for(size_t i = 1; i < p; i++){
       size_t const recvLen = (i + 1) * base > n ? n - i * base : base;
-      test += recvLen;
-      //double * temp = calloc(recvLen, sizeof(*temp));
       double temp[recvLen];
       ret = MPI_Recv(temp, recvLen, MPI_DOUBLE, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
       assert(ret == MPI_SUCCESS);
     for(size_t j = 0; j < recvLen; j++){
-      //printf("im tring to index here: %d, my value is: %lf\n", j + i * base, temp[j]);
       finalDistances[j + i * base].distance = temp[j];
       finalDistances[j + i * base].viewer_id = j + i * base;
     }
