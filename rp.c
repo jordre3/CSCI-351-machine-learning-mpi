@@ -29,6 +29,8 @@ THE SOFTWARE.
 /* MPI API */
 #include <mpi.h>
 
+#include <omp.h>
+
 /* printf, fopen, fclose, fscanf, scanf */
 #include <stdio.h>
 
@@ -88,7 +90,6 @@ main(int argc, char * argv[])
     /* Read file. */
     fscanf(fp, "%zu %zu", &n, &m);
 
-    /* Allocate memory. */
     rating = malloc(n * m * sizeof(*rating));
 
     /* Check for success. */
@@ -105,22 +106,9 @@ main(int argc, char * argv[])
     assert(!ret);
   }
 file:///usr/share/doc/HTML/en-US/index.html
-  /* Send number of viewers and movies to rest of processes. */
-  if (0 == rank) {
-    for (int r = 1; r < p; r++) {
-      ret = MPI_Send(&n, 1, MPI_SIZE_T, r, 0, MPI_COMM_WORLD);
-      assert(MPI_SUCCESS == ret);
-      ret = MPI_Send(&m, 1, MPI_SIZE_T, r, 0, MPI_COMM_WORLD);
-      assert(MPI_SUCCESS == ret);
-    }
-  } else {
-      ret = MPI_Recv(&n, 1, MPI_SIZE_T, 0, 0, MPI_COMM_WORLD,
-        MPI_STATUS_IGNORE);
-      assert(MPI_SUCCESS == ret);
-      ret = MPI_Recv(&m, 1, MPI_SIZE_T, 0, 0, MPI_COMM_WORLD,
-        MPI_STATUS_IGNORE);
-      assert(MPI_SUCCESS == ret);
-  }
+
+  MPI_Bcast(&n, 1, MPI_SIZE_T, 0, MPI_COMM_WORLD);
+  MPI_Bcast(&m, 1, MPI_SIZE_T, 0, MPI_COMM_WORLD);
 
   /* Compute base number of viewers. */
   size_t const base = 1 + ((n - 1) / p); // ceil(n / p)
@@ -128,26 +116,34 @@ file:///usr/share/doc/HTML/en-US/index.html
   /* Compute local number of viewers. */
   size_t const ln = (rank + 1) * base > n ? n - rank * base : base;
 
+  int * size;
+  int * offset;
+
   /* Send viewer data to rest of processes. */
   if (0 == rank) {
-    for (int r = 1; r < p; r++) {
-      size_t const rn = (r + 1) * base > n ? n - r * base : base;
-      ret = MPI_Send(rating + r * base * m, rn * m, MPI_DOUBLE, r, 0,
-        MPI_COMM_WORLD);
-      assert(MPI_SUCCESS == ret);
+    size = malloc(p * sizeof(int));
+    assert(size);
+    offset = malloc(p * sizeof(int));
+    assert(offset);
+    for (int r = 0; r < p; r++) {
+      int const rn = (r + 1) * base > n ? n - r * base : base;
+      size[r] = rn * m;
+      offset[r] = r * base * m;
+      // ret = MPI_Send(rating + r * base * m, rn * m, MPI_DOUBLE, r, 0,
+      //   MPI_COMM_WORLD);
+      // assert(MPI_SUCCESS == ret);
     }
   } else {
-    /* Allocate memory. */
-    rating = malloc(ln * m * sizeof(*rating));
-
-    /* Check for success. */
-    assert(rating);
-
-    ret = MPI_Recv(rating, ln * m, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD,
-      MPI_STATUS_IGNORE);
-    assert(MPI_SUCCESS == ret);
+      rating = malloc(ln * m * sizeof(*rating));
+      /* Check for success. */
+      assert(rating);
+    }
+    ret = MPI_Scatterv(rating, size, offset, MPI_DOUBLE, rating, ln * m, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    assert(ret == MPI_SUCCESS);
+  if (0 == rank){
+    free(size);
+    free(offset);
   }
-
   /* Allocate more memory. */
   double * const urating = malloc((m - 1) * sizeof(*urating));
 
@@ -161,16 +157,9 @@ file:///usr/share/doc/HTML/en-US/index.html
       fflush(stdout);
       scanf("%lf", &urating[j]);
     }
-
-    for (int r = 1; r < p; r++) {
-      ret = MPI_Send(urating, m - 1, MPI_DOUBLE, r, 0, MPI_COMM_WORLD);
-      assert(MPI_SUCCESS == ret);
-    }
-  } else {
-    ret = MPI_Recv(urating, m - 1, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD,
-      MPI_STATUS_IGNORE);
-    assert(MPI_SUCCESS == ret);
   }
+
+  MPI_Bcast(urating, m-1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
 
   /* Allocate more memory. */
   //
@@ -179,6 +168,7 @@ file:///usr/share/doc/HTML/en-US/index.html
   /* Check for success. */
   assert(distance);
 
+  double ts = omp_get_wtime();
   /* Compute distances. */
   for (size_t i = 0; i < ln; i++) {
     for (size_t j = 0; j < m - 1; j++) {
@@ -186,26 +176,38 @@ file:///usr/share/doc/HTML/en-US/index.html
     }
   }
 
+  double te = omp_get_wtime();
+  double local_elapsed = te - ts;
+  double global_elapsed;
+  ret = MPI_Reduce(&local_elapsed, &global_elapsed, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+  assert(ret == MPI_SUCCESS);
 
-  if(0 != rank){
-    ret = MPI_Send(distance, ln, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD);
-    assert(ret == MPI_SUCCESS);
+  if(rank == 0){
+    printf("Time: %lf\n", global_elapsed);
   }
-  else{
-    struct distance_metric * const finalDistances = calloc(n, sizeof(*finalDistances));
-    for(int i; i < ln; i++){
-      finalDistances[i].distance = distance[i];
-      finalDistances[i].viewer_id = i;
+
+  double * gatherDistances;
+  int * recvCounts;
+  int * displs;
+  if(rank == 0){
+    gatherDistances = malloc(n * sizeof(double));
+    recvCounts = malloc(p * sizeof(int));
+    displs = malloc(p * sizeof(int));
+    for(size_t i = 0; i < p; i++){
+      int const recvLen = (i + 1) * base > n ? n - i * base : base;
+      recvCounts[i] = recvLen;
+      displs[i] = i * base;
     }
-    for(size_t i = 1; i < p; i++){
-      size_t const recvLen = (i + 1) * base > n ? n - i * base : base;
-      double temp[recvLen];
-      ret = MPI_Recv(temp, recvLen, MPI_DOUBLE, i, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-      assert(ret == MPI_SUCCESS);
-    for(size_t j = 0; j < recvLen; j++){
-      finalDistances[j + i * base].distance = temp[j];
-      finalDistances[j + i * base].viewer_id = j + i * base;
-    }
+   }
+
+   ret = MPI_Gatherv(distance, ln, MPI_DOUBLE, gatherDistances, recvCounts, displs, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+   assert(ret == MPI_SUCCESS);
+
+if(0 == rank){
+  struct distance_metric * const finalDistances = calloc(n, sizeof(*finalDistances));
+  for(int i = 0; i < n; i++){
+    finalDistances[i].distance = gatherDistances[i];
+    finalDistances[i].viewer_id = i;
   }
  qsort(finalDistances, n, sizeof(*finalDistances), cmp);
 
